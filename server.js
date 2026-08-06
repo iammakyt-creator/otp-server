@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -138,4 +139,35 @@ app.delete('/api/otps/:id', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`[+] OTP & Licensing Control Server running on http://localhost:${PORT}`);
+});
+
+// Proxy GitHub releases API — DLL connects here instead of github.com directly
+app.get('/api/latest-release', (req, res) => {
+    const options = {
+        hostname: 'api.github.com',
+        path: '/repos/iammakyt-creator/ret-ka-maal/releases/latest',
+        method: 'GET',
+        headers: {
+            'User-Agent': 'IGFX-Update/1.0',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+    };
+
+    const ghReq = https.request(options, (ghRes) => {
+        let data = '';
+        ghRes.on('data', (chunk) => { data += chunk; });
+        ghRes.on('end', () => {
+            try {
+                const json = JSON.parse(data);
+                const asset = (json.assets || []).find(a => a.name === 'version.dll');
+                if (!asset) return res.json({ download_url: null, tag: json.tag_name || null });
+                res.json({ download_url: asset.browser_download_url, tag: json.tag_name });
+            } catch (e) {
+                res.json({ download_url: null, tag: null });
+            }
+        });
+    });
+    ghReq.on('error', () => { res.json({ download_url: null, tag: null }); });
+    ghReq.setTimeout(10000, () => { ghReq.destroy(); res.json({ download_url: null, tag: null }); });
+    ghReq.end();
 });
