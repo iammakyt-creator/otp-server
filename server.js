@@ -158,7 +158,10 @@ app.post('/api/otps/generate', async (req, res) => {
         const { type, customCode, expiryHours } = req.body;
         let code = customCode ? customCode.trim() : Math.floor(100000 + Math.random() * 900000).toString();
 
+        console.log(`[generate] code=${code} type=${type}`);
+
         const exists = await redisCmd('SISMEMBER', 'otps:all', code);
+        console.log(`[generate] SISMEMBER result: ${exists}`);
         if (exists === 1) return res.status(400).json({ error: 'OTP code already exists' });
 
         let expiresAt = null;
@@ -176,12 +179,15 @@ app.post('/api/otps/generate', async (req, res) => {
             expiresAt
         };
 
+        console.log(`[generate] SADD otps:all ${code}`);
         await redisCmd('SADD', 'otps:all', code);
+        console.log(`[generate] SET otp:${code}`);
         await redisCmd('SET', `otp:${code}`, JSON.stringify(newOtp));
+        console.log(`[generate] success`);
         res.json(newOtp);
     } catch (e) {
-        console.error('[generate]', e.message);
-        res.status(500).json({ error: 'Server error' });
+        console.error('[generate] FULL ERROR:', e.stack || e.message || e);
+        res.status(500).json({ error: 'Server error', detail: e.message });
     }
 });
 
