@@ -21,11 +21,12 @@ function ghReq(method, urlPath, body) {
             headers: { 'Authorization': 'token ' + GH_TOKEN, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'OTP-Server', 'Content-Type': 'application/json' }
         };
         if (bodyStr) opts.headers['Content-Length'] = Buffer.byteLength(bodyStr);
+        console.log('[gh]', method, urlPath, GH_TOKEN ? 'tok:' + GH_TOKEN.substring(0, 6) : 'NO_TOKEN');
         const req = https.request(opts, res => {
             let d = ''; res.on('data', c => d += c);
-            res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(d); } });
+            res.on('end', () => { console.log('[gh]', res.statusCode); try { resolve(JSON.parse(d)); } catch(e) { resolve(d); } });
         });
-        req.on('error', reject);
+        req.on('error', e => { console.error('[gh] err', e.message); reject(e); });
         req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout')); });
         if (bodyStr) req.write(bodyStr);
         req.end();
@@ -42,11 +43,12 @@ async function loadDB() {
 
 async function saveDB(data) {
     try {
-        const r = await ghReq('GET', '/gists/' + GIST_ID);
+        console.log('[save] PATCH gist with', data.length, 'items');
         const files = {};
         files['otps.json'] = { content: JSON.stringify(data, null, 2) };
-        await ghReq('PATCH', '/gists/' + GIST_ID, { files });
-    } catch(e) { console.error('[save]', e.message); }
+        const r = await ghReq('PATCH', '/gists/' + GIST_ID, { files });
+        console.log('[save] result:', JSON.stringify(r).substring(0, 200));
+    } catch(e) { console.error('[save] FAILED', e.message); }
 }
 
 app.get('/health', (req, res) => res.json({ ok: true, db: 'gist' }));
