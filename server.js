@@ -179,9 +179,39 @@ app.get('/api/otps', async (req, res) => {
     try {
         const codes = await redisCmd('SMEMBERS', 'otps:all');
         if (!codes || !codes.length) return res.json([]);
+
+        // Pipeline all GETs in one request
+        const getPipes = codes.map(c => ['GET', `otp:${c}`]);
+        const results = await new Promise((resolve, reject) => {
+            const body = JSON.stringify(getPipes);
+            const url = new URL(REDIS_URL);
+            const options = {
+                hostname: url.hostname,
+                port: 443,
+                path: '/',
+                method: 'POST',
+                agent: REDIS_AGENT,
+                headers: {
+                    'Authorization': `Bearer ${REDIS_TOKEN}`,
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(body)
+                }
+            };
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
+                res.on('end', () => {
+                    try { resolve(JSON.parse(data).result || []); } catch(e) { resolve([]); }
+                });
+            });
+            req.on('error', () => resolve([]));
+            req.setTimeout(60000, () => { req.destroy(); resolve([]); });
+            req.write(body);
+            req.end();
+        });
+
         const otps = [];
-        for (const code of codes) {
-            const raw = await redisCmd('GET', `otp:${code}`);
+        for (const raw of results) {
             if (raw) {
                 try { otps.push(typeof raw === 'string' ? JSON.parse(raw) : raw); } catch(e) {}
             }
