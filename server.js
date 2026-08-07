@@ -66,6 +66,18 @@ app.get('/health', (req, res) => {
     res.json({ ok: true, redis: redisReady });
 });
 
+// Debug endpoint
+app.get('/debug', async (req, res) => {
+    try {
+        const ping = await redisCmd('PING');
+        const smembers = await redisCmd('SMEMBERS', 'otps:all');
+        const sismember = await redisCmd('SISMEMBER', 'otps:all', 'test');
+        res.json({ ping, smembers, sismember, redisReady });
+    } catch (e) {
+        res.json({ error: e.message, redisReady });
+    }
+});
+
 // â”€â”€ OTP CRUD via Redis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 app.post('/api/verify-otp', async (req, res) => {
