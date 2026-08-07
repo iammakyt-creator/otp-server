@@ -51,7 +51,14 @@ async function saveDB(data) {
     } catch(e) { console.error('[save] FAILED', e.message); }
 }
 
-app.get('/health', (req, res) => res.json({ ok: true, db: 'gist' }));
+app.get('/health', (req, res) => res.json({ ok: true, db: 'gist', hasToken: !!GH_TOKEN, tokenPrefix: GH_TOKEN ? GH_TOKEN.substring(0, 6) : 'none' }));
+
+app.get('/debug', async (req, res) => {
+    try {
+        const r = await ghReq('GET', '/gists/' + GIST_ID);
+        res.json({ gistOk: !!r.files, files: Object.keys(r.files || {}), content: r.files && r.files['otps.json'] ? r.files['otps.json'].content.substring(0, 200) : 'none' });
+    } catch(e) { res.json({ error: e.message }); }
+});
 
 app.post('/api/verify-otp', async (req, res) => {
     try {
