@@ -60,7 +60,7 @@ function redisCmd(...args) {
     });
 }
 
-// Pipeline multiple commands in one request
+// Pipeline multiple commands in one request (Upstash format: array of command strings)
 function redisPipeline(commands) {
     return new Promise((resolve, reject) => {
         if (!redisReady) return reject(new Error('Redis not configured'));
@@ -213,13 +213,43 @@ app.post('/api/otps/generate', async (req, res) => {
             expiresAt
         };
 
-        // Pipeline: check exists + add + store in one request
-        const results = await redisPipeline([
+        // Use pipeline for speed â€” returns array of results
+        const pipelineBody = JSON.stringify([
             ['SISMEMBER', 'otps:all', code],
             ['SADD', 'otps:all', code],
             ['SET', `otp:${code}`, JSON.stringify(newOtp)]
         ]);
 
+        const pipelineResult = await new Promise((resolve, reject) => {
+            const url = new URL(REDIS_URL);
+            const options = {
+                hostname: url.hostname,
+                port: 443,
+                path: '/',
+                method: 'POST',
+                agent: REDIS_AGENT,
+                headers: {
+                    'Authorization': `Bearer ${REDIS_TOKEN}`,
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(pipelineBody)
+                }
+            };
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
+                res.on('end', () => {
+                    try { resolve(JSON.parse(data)); } catch(e) { reject(e); }
+                });
+            });
+            req.on('error', reject);
+            req.setTimeout(60000, () => { req.destroy(); reject(new Error('timeout')); });
+            req.write(pipelineBody);
+            req.end();
+        });
+
+        console.log(`[generate] pipeline response: ${JSON.stringify(pipelineResult).substring(0, 500)}`);
+
+        const results = pipelineResult.result || [];
         if (results[0] === 1) {
             return res.status(400).json({ error: 'OTP code already exists' });
         }
