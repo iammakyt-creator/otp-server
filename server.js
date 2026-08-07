@@ -56,8 +56,8 @@ app.get('/health', (req, res) => res.json({ ok: true, db: 'gist', hasToken: !!GH
 app.get('/debug', async (req, res) => {
     try {
         const r = await ghReq('GET', '/gists/' + GIST_ID);
-        res.json({ gistOk: !!r.files, files: Object.keys(r.files || {}), content: r.files && r.files['otps.json'] ? r.files['otps.json'].content.substring(0, 200) : 'none' });
-    } catch(e) { res.json({ error: e.message }); }
+        res.json({ gistOk: !!r.files, files: Object.keys(r.files || {}), content: r.files && r.files['otps.json'] ? r.files['otps.json'].content.substring(0, 200) : 'none', raw: JSON.stringify(r).substring(0, 500) });
+    } catch(e) { res.json({ error: e.message, tokenOk: !!GH_TOKEN }); }
 });
 
 app.post('/api/verify-otp', async (req, res) => {
