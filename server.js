@@ -9,8 +9,14 @@ const PORT = process.env.PORT || 3000;
 // â”€â”€ Upstash Redis (persistent â€” survives Render restarts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const redisReady = REDIS_URL && REDIS_TOKEN;
+
+if (!redisReady) {
+    console.error('[!] UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not set');
+}
 
 async function redis(...args) {
+    if (!redisReady) throw new Error('Redis not configured');
     const res = await fetch(REDIS_URL, {
         method: 'POST',
         headers: {
