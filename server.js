@@ -24,7 +24,7 @@ function redisCmd(...args) {
         const body = JSON.stringify(args);
         const options = {
             hostname: url.hostname,
-            port: url.port || 443,
+            port: 443,
             path: '/',
             method: 'POST',
             headers: {
@@ -39,14 +39,19 @@ function redisCmd(...args) {
             res.on('end', () => {
                 try {
                     const json = JSON.parse(data);
+                    if (json.error) {
+                        console.error(`[redis] ${args[0]} error: ${json.error}`);
+                        return reject(new Error(json.error));
+                    }
                     resolve(json.result);
                 } catch (e) {
+                    console.error(`[redis] parse error for ${args[0]}: ${data.substring(0, 200)}`);
                     reject(e);
                 }
             });
         });
-        req.on('error', reject);
-        req.setTimeout(10000, () => { req.destroy(); reject(new Error('Redis timeout')); });
+        req.on('error', (e) => { console.error(`[redis] ${args[0]} network: ${e.message}`); reject(e); });
+        req.setTimeout(30000, () => { req.destroy(); reject(new Error('Redis timeout')); });
         req.write(body);
         req.end();
     });
