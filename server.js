@@ -17,6 +17,8 @@ if (!redisReady) {
     console.log('[+] Upstash Redis configured');
 }
 
+const REDIS_AGENT = new https.Agent({ keepAlive: true, maxSockets: 5 });
+
 function redisCmd(...args) {
     return new Promise((resolve, reject) => {
         if (!redisReady) return reject(new Error('Redis not configured'));
@@ -27,6 +29,7 @@ function redisCmd(...args) {
             port: 443,
             path: '/',
             method: 'POST',
+            agent: REDIS_AGENT,
             headers: {
                 'Authorization': `Bearer ${REDIS_TOKEN}`,
                 'Content-Type': 'application/json',
@@ -51,7 +54,44 @@ function redisCmd(...args) {
             });
         });
         req.on('error', (e) => { console.error(`[redis] ${args[0]} network: ${e.message}`); reject(e); });
-        req.setTimeout(30000, () => { req.destroy(); reject(new Error('Redis timeout')); });
+        req.setTimeout(45000, () => { req.destroy(); reject(new Error('Redis timeout')); });
+        req.write(body);
+        req.end();
+    });
+}
+
+// Pipeline multiple commands in one request
+function redisPipeline(commands) {
+    return new Promise((resolve, reject) => {
+        if (!redisReady) return reject(new Error('Redis not configured'));
+        const url = new URL(REDIS_URL);
+        const body = JSON.stringify(commands);
+        const options = {
+            hostname: url.hostname,
+            port: 443,
+            path: '/',
+            method: 'POST',
+            agent: REDIS_AGENT,
+            headers: {
+                'Authorization': `Bearer ${REDIS_TOKEN}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(body)
+            }
+        };
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    resolve(json.result);
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(45000, () => { req.destroy(); reject(new Error('Redis pipeline timeout')); });
         req.write(body);
         req.end();
     });
@@ -158,12 +198,6 @@ app.post('/api/otps/generate', async (req, res) => {
         const { type, customCode, expiryHours } = req.body;
         let code = customCode ? customCode.trim() : Math.floor(100000 + Math.random() * 900000).toString();
 
-        console.log(`[generate] code=${code} type=${type}`);
-
-        const exists = await redisCmd('SISMEMBER', 'otps:all', code);
-        console.log(`[generate] SISMEMBER result: ${exists}`);
-        if (exists === 1) return res.status(400).json({ error: 'OTP code already exists' });
-
         let expiresAt = null;
         if (expiryHours && !isNaN(expiryHours) && expiryHours > 0) {
             expiresAt = new Date(Date.now() + expiryHours * 3600 * 1000).toISOString();
@@ -179,11 +213,17 @@ app.post('/api/otps/generate', async (req, res) => {
             expiresAt
         };
 
-        console.log(`[generate] SADD otps:all ${code}`);
-        await redisCmd('SADD', 'otps:all', code);
-        console.log(`[generate] SET otp:${code}`);
-        await redisCmd('SET', `otp:${code}`, JSON.stringify(newOtp));
-        console.log(`[generate] success`);
+        // Pipeline: check exists + add + store in one request
+        const results = await redisPipeline([
+            ['SISMEMBER', 'otps:all', code],
+            ['SADD', 'otps:all', code],
+            ['SET', `otp:${code}`, JSON.stringify(newOtp)]
+        ]);
+
+        if (results[0] === 1) {
+            return res.status(400).json({ error: 'OTP code already exists' });
+        }
+
         res.json(newOtp);
     } catch (e) {
         console.error('[generate] FULL ERROR:', e.stack || e.message || e);
