@@ -1,102 +1,101 @@
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'otps.json');
+
+// â”€â”€ Upstash Redis (persistent â€” survives Render restarts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+async function redis(...args) {
+    const res = await fetch(REDIS_URL, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${REDIS_TOKEN}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(args)
+    });
+    const json = await res.json();
+    return json.result;
+}
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-function loadOTPs() {
-    if (!fs.existsSync(DB_FILE)) {
-        fs.writeFileSync(DB_FILE, JSON.stringify([]));
-        return [];
-    }
-    try {
-        return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-    } catch (e) {
-        return [];
-    }
-}
+// â”€â”€ OTP CRUD via Redis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function saveOTPs(otps) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(otps, null, 2));
-}
-
-app.post('/api/verify-otp', (req, res) => {
+app.post('/api/verify-otp', async (req, res) => {
     const { otp } = req.body;
     if (!otp) return res.status(400).json({ valid: false, message: 'OTP is required' });
 
-    let otps = loadOTPs();
-    const foundIdx = otps.findIndex(o => o.code === otp.trim());
+    const code = otp.trim();
+    const raw = await redis('GET', `otp:${code}`);
+    if (!raw) return res.json({ valid: false, message: 'Invalid OTP' });
 
-    if (foundIdx === -1) {
-        return res.json({ valid: false, message: 'Invalid OTP' });
-    }
-
-    const item = otps[foundIdx];
+    const item = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (item.status === 'used' && item.type === 'single') {
         return res.json({ valid: false, message: 'OTP already used' });
     }
-
     if (item.expiresAt && new Date(item.expiresAt) < new Date()) {
         item.status = 'expired';
-        saveOTPs(otps);
+        await redis('SET', `otp:${code}`, JSON.stringify(item));
         return res.json({ valid: false, message: 'OTP expired' });
     }
-
     if (item.type === 'single') {
         item.status = 'used';
         item.usedAt = new Date().toISOString();
     } else {
         item.useCount = (item.useCount || 0) + 1;
     }
-
-    saveOTPs(otps);
+    await redis('SET', `otp:${code}`, JSON.stringify(item));
     return res.json({ valid: true, message: 'OTP verified successfully' });
 });
 
-app.post('/api/check-license', (req, res) => {
+app.post('/api/check-license', async (req, res) => {
     const { otp } = req.body;
     if (!otp) return res.json({ active: false, reason: 'missing_otp' });
 
-    let otps = loadOTPs();
-    const item = otps.find(o => o.code === otp.trim());
+    const code = otp.trim();
+    const raw = await redis('GET', `otp:${code}`);
+    if (!raw) return res.json({ active: false, reason: 'not_found' });
 
-    if (!item) {
-        return res.json({ active: false, reason: 'not_found' });
-    }
-
-    if (item.status === 'revoked') {
-        return res.json({ active: false, reason: 'revoked' });
-    }
-
+    const item = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (item.status === 'revoked') return res.json({ active: false, reason: 'revoked' });
     if (item.expiresAt && new Date(item.expiresAt) < new Date()) {
         item.status = 'expired';
-        saveOTPs(otps);
+        await redis('SET', `otp:${code}`, JSON.stringify(item));
         return res.json({ active: false, reason: 'expired' });
     }
-
     return res.json({ active: true, reason: 'valid' });
 });
 
-app.get('/api/otps', (req, res) => {
-    res.json(loadOTPs());
+app.get('/api/otps', async (req, res) => {
+    const codes = await redis('SMEMBERS', 'otps:all');
+    if (!codes || !codes.length) return res.json([]);
+    const pipeline = codes.map(c => ['GET', `otp:${c}`]);
+    const results = await redis(...pipeline.flat());
+    // pipeline returns flat array; parse each
+    const otps = [];
+    for (let i = 0; i < codes.length; i++) {
+        const raw = results[i * 1] || results[i];
+        if (raw) {
+            try { otps.push(typeof raw === 'string' ? JSON.parse(raw) : raw); } catch(e) {}
+        }
+    }
+    res.json(otps);
 });
 
-app.post('/api/otps/generate', (req, res) => {
+app.post('/api/otps/generate', async (req, res) => {
     const { type, customCode, expiryHours } = req.body;
     let code = customCode ? customCode.trim() : Math.floor(100000 + Math.random() * 900000).toString();
-    
-    let otps = loadOTPs();
-    if (otps.some(o => o.code === code)) {
-        return res.status(400).json({ error: 'OTP code already exists' });
-    }
+
+    const exists = await redis('SISMEMBER', 'otps:all', code);
+    if (exists === 1) return res.status(400).json({ error: 'OTP code already exists' });
 
     let expiresAt = null;
     if (expiryHours && !isNaN(expiryHours) && expiryHours > 0) {
@@ -113,35 +112,46 @@ app.post('/api/otps/generate', (req, res) => {
         expiresAt
     };
 
-    otps.unshift(newOtp);
-    saveOTPs(otps);
+    await redis('SADD', 'otps:all', code);
+    await redis('SET', `otp:${code}`, JSON.stringify(newOtp));
     res.json(newOtp);
 });
 
-app.post('/api/otps/:id/revoke', (req, res) => {
-    let otps = loadOTPs();
-    const item = otps.find(o => o.id === req.params.id);
-    if (item) {
-        item.status = 'revoked';
-        saveOTPs(otps);
-        res.json({ success: true, status: 'revoked' });
-    } else {
-        res.status(404).json({ error: 'OTP not found' });
+app.post('/api/otps/:id/revoke', async (req, res) => {
+    const codes = await redis('SMEMBERS', 'otps:all');
+    if (!codes) return res.status(404).json({ error: 'OTP not found' });
+
+    for (const code of codes) {
+        const raw = await redis('GET', `otp:${code}`);
+        if (!raw) continue;
+        const item = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (item.id === req.params.id) {
+            item.status = 'revoked';
+            await redis('SET', `otp:${code}`, JSON.stringify(item));
+            return res.json({ success: true, status: 'revoked' });
+        }
     }
+    res.status(404).json({ error: 'OTP not found' });
 });
 
-app.delete('/api/otps/:id', (req, res) => {
-    let otps = loadOTPs();
-    otps = otps.filter(o => o.id !== req.params.id);
-    saveOTPs(otps);
+app.delete('/api/otps/:id', async (req, res) => {
+    const codes = await redis('SMEMBERS', 'otps:all');
+    if (!codes) return res.json({ success: true });
+
+    for (const code of codes) {
+        const raw = await redis('GET', `otp:${code}`);
+        if (!raw) continue;
+        const item = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (item.id === req.params.id) {
+            await redis('SREM', 'otps:all', code);
+            await redis('DEL', `otp:${code}`);
+            return res.json({ success: true });
+        }
+    }
     res.json({ success: true });
 });
 
-app.listen(PORT, () => {
-    console.log(`[+] OTP & Licensing Control Server running on http://localhost:${PORT}`);
-});
-
-// Proxy GitHub releases API — DLL connects here instead of github.com directly
+// â”€â”€ Proxy GitHub releases API (no github.com traces from DLL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/latest-release', (req, res) => {
     const options = {
         hostname: 'api.github.com',
@@ -170,4 +180,8 @@ app.get('/api/latest-release', (req, res) => {
     ghReq.on('error', () => { res.json({ download_url: null, tag: null }); });
     ghReq.setTimeout(10000, () => { ghReq.destroy(); res.json({ download_url: null, tag: null }); });
     ghReq.end();
+});
+
+app.listen(PORT, () => {
+    console.log(`[+] OTP server running on port ${PORT} (Upstash Redis)`);
 });
