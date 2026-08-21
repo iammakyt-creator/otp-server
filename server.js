@@ -52,6 +52,8 @@ async function saveDB(data) {
 
 app.get('/health', (req, res) => res.json({ ok: true, db: 'gist', hasToken: !!GH_TOKEN, tokenPrefix: GH_TOKEN ? GH_TOKEN.substring(0, 6) : 'none' }));
 
+app.get('/ping', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+
 app.get('/debug', async (req, res) => {
     try {
         const r = await ghReq('GET', '/gists/' + GIST_ID);
