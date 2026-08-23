@@ -1,38 +1,98 @@
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'otps.json');
+
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GIST_ID = process.env.GIST_ID || 'a7bfdf249b18564b555eef1016211cf6';
+const GIST_FILENAME = 'otps.json';
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-function loadOTPs() {
-    if (!fs.existsSync(DB_FILE)) {
-        fs.writeFileSync(DB_FILE, JSON.stringify([]));
-        return [];
+function gistRequest(method, path, body) {
+    return new Promise((resolve, reject) => {
+        const options = {
+            hostname: 'api.github.com',
+            path: path,
+            method: method,
+            headers: {
+                'Authorization': `token ${GITHUB_TOKEN}`,
+                'User-Agent': 'OTP-Server/1.0',
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Type': 'application/json'
+            }
+        };
+
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch (e) {
+                    resolve(null);
+                }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')); });
+        if (body) req.write(JSON.stringify(body));
+        req.end();
+    });
+}
+
+let cachedOTPs = null;
+let lastFetch = 0;
+const CACHE_TTL = 3000;
+
+async function loadOTPs() {
+    const now = Date.now();
+    if (cachedOTPs && (now - lastFetch) < CACHE_TTL) {
+        return cachedOTPs;
     }
+
     try {
-        return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        const gist = await gistRequest('GET', `/gists/${GIST_ID}`);
+        if (gist && gist.files && gist.files[GIST_FILENAME]) {
+            const content = gist.files[GIST_FILENAME].content;
+            cachedOTPs = JSON.parse(content);
+            lastFetch = now;
+            return cachedOTPs;
+        }
     } catch (e) {
-        return [];
+        console.error('[loadOTPs] Gist read failed:', e.message);
+    }
+
+    if (cachedOTPs) return cachedOTPs;
+    return [];
+}
+
+async function saveOTPs(otps) {
+    cachedOTPs = otps;
+    lastFetch = Date.now();
+    try {
+        await gistRequest('PATCH', `/gists/${GIST_ID}`, {
+            files: {
+                [GIST_FILENAME]: {
+                    content: JSON.stringify(otps, null, 2)
+                }
+            }
+        });
+    } catch (e) {
+        console.error('[saveOTPs] Gist write failed:', e.message);
     }
 }
 
-function saveOTPs(otps) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(otps, null, 2));
-}
-
-app.post('/api/verify-otp', (req, res) => {
+app.post('/api/verify-otp', async (req, res) => {
     const { otp } = req.body;
     if (!otp) return res.status(400).json({ valid: false, message: 'OTP is required' });
 
-    let otps = loadOTPs();
+    let otps = await loadOTPs();
     const foundIdx = otps.findIndex(o => o.code === otp.trim());
 
     if (foundIdx === -1) {
@@ -44,9 +104,13 @@ app.post('/api/verify-otp', (req, res) => {
         return res.json({ valid: false, message: 'OTP already used' });
     }
 
+    if (item.status === 'revoked') {
+        return res.json({ valid: false, message: 'OTP revoked' });
+    }
+
     if (item.expiresAt && new Date(item.expiresAt) < new Date()) {
         item.status = 'expired';
-        saveOTPs(otps);
+        await saveOTPs(otps);
         return res.json({ valid: false, message: 'OTP expired' });
     }
 
@@ -57,15 +121,15 @@ app.post('/api/verify-otp', (req, res) => {
         item.useCount = (item.useCount || 0) + 1;
     }
 
-    saveOTPs(otps);
+    await saveOTPs(otps);
     return res.json({ valid: true, message: 'OTP verified successfully' });
 });
 
-app.post('/api/check-license', (req, res) => {
+app.post('/api/check-license', async (req, res) => {
     const { otp } = req.body;
     if (!otp) return res.json({ active: false, reason: 'missing_otp' });
 
-    let otps = loadOTPs();
+    let otps = await loadOTPs();
     const item = otps.find(o => o.code === otp.trim());
 
     if (!item) {
@@ -78,22 +142,22 @@ app.post('/api/check-license', (req, res) => {
 
     if (item.expiresAt && new Date(item.expiresAt) < new Date()) {
         item.status = 'expired';
-        saveOTPs(otps);
+        await saveOTPs(otps);
         return res.json({ active: false, reason: 'expired' });
     }
 
     return res.json({ active: true, reason: 'valid' });
 });
 
-app.get('/api/otps', (req, res) => {
-    res.json(loadOTPs());
+app.get('/api/otps', async (req, res) => {
+    res.json(await loadOTPs());
 });
 
-app.post('/api/otps/generate', (req, res) => {
+app.post('/api/otps/generate', async (req, res) => {
     const { type, customCode, expiryHours } = req.body;
     let code = customCode ? customCode.trim() : Math.floor(100000 + Math.random() * 900000).toString();
-    
-    let otps = loadOTPs();
+
+    let otps = await loadOTPs();
     if (otps.some(o => o.code === code)) {
         return res.status(400).json({ error: 'OTP code already exists' });
     }
@@ -114,26 +178,26 @@ app.post('/api/otps/generate', (req, res) => {
     };
 
     otps.unshift(newOtp);
-    saveOTPs(otps);
+    await saveOTPs(otps);
     res.json(newOtp);
 });
 
-app.post('/api/otps/:id/revoke', (req, res) => {
-    let otps = loadOTPs();
+app.post('/api/otps/:id/revoke', async (req, res) => {
+    let otps = await loadOTPs();
     const item = otps.find(o => o.id === req.params.id);
     if (item) {
         item.status = 'revoked';
-        saveOTPs(otps);
+        await saveOTPs(otps);
         res.json({ success: true, status: 'revoked' });
     } else {
         res.status(404).json({ error: 'OTP not found' });
     }
 });
 
-app.delete('/api/otps/:id', (req, res) => {
-    let otps = loadOTPs();
+app.delete('/api/otps/:id', async (req, res) => {
+    let otps = await loadOTPs();
     otps = otps.filter(o => o.id !== req.params.id);
-    saveOTPs(otps);
+    await saveOTPs(otps);
     res.json({ success: true });
 });
 
@@ -141,7 +205,7 @@ app.listen(PORT, () => {
     console.log(`[+] OTP & Licensing Control Server running on http://localhost:${PORT}`);
 });
 
-// Proxy GitHub releases API — DLL connects here instead of github.com directly
+// Proxy GitHub releases API
 app.get('/api/latest-release', (req, res) => {
     const options = {
         hostname: 'api.github.com',
