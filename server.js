@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
@@ -9,6 +10,8 @@ const PORT = process.env.PORT || 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GIST_ID = process.env.GIST_ID || 'a7bfdf249b18564b555eef1016211cf6';
 const GIST_FILENAME = 'otps.json';
+const DB_FILE = path.join(__dirname, 'otps.json');
+const useGist = !!GITHUB_TOKEN;
 
 app.use(cors());
 app.use(express.json());
@@ -50,41 +53,66 @@ let cachedOTPs = null;
 let lastFetch = 0;
 const CACHE_TTL = 3000;
 
+function loadLocalOTPs() {
+    if (!fs.existsSync(DB_FILE)) {
+        fs.writeFileSync(DB_FILE, JSON.stringify([]));
+        return [];
+    }
+    try {
+        return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    } catch (e) {
+        return [];
+    }
+}
+
+function saveLocalOTPs(otps) {
+    fs.writeFileSync(DB_FILE, JSON.stringify(otps, null, 2));
+}
+
 async function loadOTPs() {
     const now = Date.now();
     if (cachedOTPs && (now - lastFetch) < CACHE_TTL) {
         return cachedOTPs;
     }
 
-    try {
-        const gist = await gistRequest('GET', `/gists/${GIST_ID}`);
-        if (gist && gist.files && gist.files[GIST_FILENAME]) {
-            const content = gist.files[GIST_FILENAME].content;
-            cachedOTPs = JSON.parse(content);
-            lastFetch = now;
-            return cachedOTPs;
+    if (useGist) {
+        try {
+            const gist = await gistRequest('GET', `/gists/${GIST_ID}`);
+            if (gist && gist.files && gist.files[GIST_FILENAME]) {
+                const content = gist.files[GIST_FILENAME].content;
+                cachedOTPs = JSON.parse(content);
+                lastFetch = now;
+                return cachedOTPs;
+            }
+        } catch (e) {
+            console.error('[loadOTPs] Gist read failed, falling back to local:', e.message);
         }
-    } catch (e) {
-        console.error('[loadOTPs] Gist read failed:', e.message);
     }
 
-    if (cachedOTPs) return cachedOTPs;
-    return [];
+    cachedOTPs = loadLocalOTPs();
+    lastFetch = now;
+    return cachedOTPs;
 }
 
 async function saveOTPs(otps) {
     cachedOTPs = otps;
     lastFetch = Date.now();
-    try {
-        await gistRequest('PATCH', `/gists/${GIST_ID}`, {
-            files: {
-                [GIST_FILENAME]: {
-                    content: JSON.stringify(otps, null, 2)
+
+    if (useGist) {
+        try {
+            await gistRequest('PATCH', `/gists/${GIST_ID}`, {
+                files: {
+                    [GIST_FILENAME]: {
+                        content: JSON.stringify(otps, null, 2)
+                    }
                 }
-            }
-        });
-    } catch (e) {
-        console.error('[saveOTPs] Gist write failed:', e.message);
+            });
+        } catch (e) {
+            console.error('[saveOTPs] Gist write failed, saving locally:', e.message);
+            saveLocalOTPs(otps);
+        }
+    } else {
+        saveLocalOTPs(otps);
     }
 }
 
